@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Model files
+model/
+zq/model/
+data/raw/*
+data/knowledge/*
+# Results and outputs
+
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# PyCharm/VSCode
+.idea/
+.vscode/
+
+# Virtual environment
+venv/
+env/
