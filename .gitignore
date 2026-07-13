@@ -13,7 +13,7 @@ __pycache__/
 model/
 zq/model/
 data/raw/*
-data/knowledge/*
+data/processed/*
 # Results and outputs
 
 
