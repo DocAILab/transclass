@@ -26,5 +26,6 @@ Thumbs.db
 .vscode/
 
 # Virtual environment
+.venv/
 venv/
 env/
