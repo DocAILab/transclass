@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -13,12 +14,33 @@ from .split import split_dataset
 
 MAPPINGS_DIR = Path(__file__).resolve().parent / "mappings"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-BUILTIN_DATASETS = ("finance", "infra", "pers_info")
-DEFAULT_INPUT_NAMES = {
-    "finance": ("finance.xlsx", "finance.csv"),
-    "infra": ("infra.xlsx", "infras.xlsx", "infra.csv", "infras.csv"),
-    "pers_info": ("pers_info.xlsx", "pers_info.csv"),
-}
+DATASET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def _normalize_dataset_name(value: str) -> str:
+    normalized = value.strip().lower()
+    if not DATASET_NAME_PATTERN.fullmatch(normalized):
+        raise ValueError(
+            "dataset must contain only letters, numbers, underscores, and hyphens"
+        )
+    return normalized
+
+
+def dataset_name(value: str) -> str:
+    """Argparse adapter for safe dataset names."""
+    try:
+        return _normalize_dataset_name(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def discover_datasets() -> tuple[str, ...]:
+    """Discover datasets from JSON files in the mappings directory."""
+    return tuple(sorted(
+        path.stem
+        for path in MAPPINGS_DIR.glob("*.json")
+        if DATASET_NAME_PATTERN.fullmatch(path.stem)
+    ))
 
 
 def resolve_mapping(dataset: str | None, mapping: Path | None) -> Path:
@@ -27,18 +49,27 @@ def resolve_mapping(dataset: str | None, mapping: Path | None) -> Path:
         return mapping
     if dataset is None:
         raise ValueError("either --dataset or --mapping is required")
+    dataset = _normalize_dataset_name(dataset)
     mapping_path = MAPPINGS_DIR / f"{dataset}.json"
     if not mapping_path.is_file():
         raise FileNotFoundError(
-            f"Built-in mapping for dataset '{dataset}' not found: {mapping_path}"
+            f"Mapping for dataset '{dataset}' not found: {mapping_path}. "
+            "Add that file or pass --mapping."
         )
     return mapping_path
 
 
 def resolve_default_input(dataset: str) -> Path:
-    """Find the conventional raw input file for a built-in dataset."""
+    """Find a conventional CSV/XLSX raw input for a dataset."""
+    dataset = _normalize_dataset_name(dataset)
     raw_dir = PROJECT_ROOT / "data" / "raw"
-    candidates = [raw_dir / name for name in DEFAULT_INPUT_NAMES[dataset]]
+    # The plural form keeps compatibility with files such as infras.xlsx.
+    stems = (dataset, f"{dataset}s")
+    candidates = [
+        raw_dir / f"{stem}{suffix}"
+        for stem in stems
+        for suffix in (".xlsx", ".csv")
+    ]
     existing = [path for path in candidates if path.is_file()]
     if len(existing) == 1:
         return existing[0]
@@ -71,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
+    commands.add_parser(
+        "list-datasets",
+        help="List datasets discovered from preprocessing/mappings/*.json.",
+    )
+
     preprocess_parser = commands.add_parser(
         "preprocess", help="Convert CSV/XLSX metadata to normalized JSON."
     )
@@ -78,8 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
     mapping_source = preprocess_parser.add_mutually_exclusive_group(required=True)
     mapping_source.add_argument(
         "--dataset",
-        choices=BUILTIN_DATASETS,
-        help="Use a mapping bundled for a known dataset.",
+        type=dataset_name,
+        help="Use mappings/<dataset>.json.",
     )
     mapping_source.add_argument(
         "--mapping",
@@ -88,15 +124,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     preprocess_parser.add_argument("--output", required=True, type=Path)
     preprocess_parser.add_argument(
+        "--missing-field-policy",
+        choices=("error", "skip"),
+        default="error",
+        help="How to handle rows without field_name (default: error).",
+    )
+    preprocess_parser.add_argument(
         "--overwrite", action="store_true", help="Replace an existing output file."
     )
 
     prepare_parser = commands.add_parser(
         "prepare",
-        help="Preprocess and split a built-in dataset in one command.",
+        help="Discover, preprocess, and split a dataset in one command.",
     )
     prepare_parser.add_argument(
-        "--dataset", required=True, choices=BUILTIN_DATASETS
+        "--dataset", required=True, type=dataset_name
     )
     prepare_parser.add_argument(
         "--input",
@@ -127,10 +169,22 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: metadata.table_name)."
         ),
     )
+    prepare_parser.add_argument(
+        "--missing-group-policy",
+        choices=("error", "skip"),
+        default="skip",
+        help="How to handle empty group keys (default: skip).",
+    )
     prepare_parser.add_argument("--train-ratio", type=_ratio, default=0.8)
     prepare_parser.add_argument("--val-ratio", type=_ratio, default=0.1)
     prepare_parser.add_argument("--test-ratio", type=_ratio, default=0.1)
     prepare_parser.add_argument("--seed", type=int, default=42)
+    prepare_parser.add_argument(
+        "--missing-field-policy",
+        choices=("error", "skip"),
+        default="skip",
+        help="How to handle table-level rows without field_name (default: skip).",
+    )
     prepare_parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -153,6 +207,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--group-key", help="Nested key for group splitting, e.g. metadata.table_name."
     )
     split_parser.add_argument(
+        "--missing-group-policy",
+        choices=("error", "skip"),
+        default="error",
+        help="How to handle empty group keys (default: error).",
+    )
+    split_parser.add_argument(
         "--overwrite", action="store_true", help="Replace existing split outputs."
     )
     return parser
@@ -162,10 +222,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.command == "preprocess":
+        if args.command == "list-datasets":
+            datasets = discover_datasets()
+            if datasets:
+                print("\n".join(datasets))
+            else:
+                print(f"No mappings found in {MAPPINGS_DIR}")
+        elif args.command == "preprocess":
             mapping = resolve_mapping(args.dataset, args.mapping)
             result = preprocess(
-                args.input, mapping, args.output, overwrite=args.overwrite
+                args.input,
+                mapping,
+                args.output,
+                overwrite=args.overwrite,
+                missing_field_policy=args.missing_field_policy,
             )
             print(f"Preprocessed {len(result)} records -> {args.output}")
         elif args.command == "prepare":
@@ -177,7 +247,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             all_file = output_dir / "all.json"
             result = preprocess(
-                input_file, mapping, all_file, overwrite=args.overwrite
+                input_file,
+                mapping,
+                all_file,
+                overwrite=args.overwrite,
+                missing_field_policy=args.missing_field_policy,
             )
             print(f"Preprocessed {len(result)} records -> {all_file}")
             report = split_dataset(
@@ -191,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
                 group_key=(
                     args.group_key if args.split_type == "group" else None
                 ),
+                missing_group_policy=args.missing_group_policy,
                 overwrite=args.overwrite,
             )
             print(json.dumps(report["sizes"], ensure_ascii=False))
@@ -208,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
                 test_ratio=args.test_ratio,
                 random_seed=args.seed,
                 group_key=args.group_key,
+                missing_group_policy=args.missing_group_policy,
                 overwrite=args.overwrite,
             )
             print(json.dumps(report["sizes"], ensure_ascii=False))

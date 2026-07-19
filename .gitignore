@@ -14,9 +14,9 @@ model/
 zq/model/
 data/raw/*
 data/processed/*
+data/rtf/*
+script\preprocessing\rft_export.py
 # Results and outputs
-
-
 # OS files
 .DS_Store
 Thumbs.db

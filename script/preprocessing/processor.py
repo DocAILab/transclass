@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import tempfile
 import uuid
+import warnings
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ CLASSIFICATION_FIELDS = ("level_1", "level_2", "level_3", "level_4")
 IDENTITY_FIELDS = ("database_name", "table_name", "field_name")
 
 
+@lru_cache(maxsize=1)
 def _load_pandas():
     try:
         import pandas as pd
@@ -82,22 +84,40 @@ def load_mapping(path: str | Path) -> dict[str, str]:
     if not all(isinstance(key, str) and isinstance(value, str) for key, value in mapping.items()):
         raise ValueError("Every mapping key and value must be a string")
 
-    return {key.strip(): value.strip() for key, value in mapping.items()}
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in mapping.items():
+        key = raw_key.strip()
+        value = raw_value.strip()
+        if not key or not value:
+            raise ValueError("Mapping keys and values cannot be empty")
+        if key in normalized:
+            raise ValueError(f"Duplicate mapping source after trimming: {key!r}")
+        normalized[key] = value
+    return normalized
 
 
 def clean_text(value: Any) -> str:
     if value is None:
         return ""
-    if isinstance(value, float) and math.isnan(value):
-        return ""
+    try:
+        missing = _load_pandas().isna(value)
+        if bool(missing):
+            return ""
+    except (TypeError, ValueError):
+        # Non-scalar values are not expected here; stringify them below so
+        # validation can still report the relevant source field.
+        pass
     return re.sub(r"\s+", " ", str(value).strip())
 
 
 def normalize_label(value: Any) -> str:
     text = clean_text(value)
-    # Remove a trailing classification code such as （A3）, (A01), or 【A】.
+    # Remove a trailing classification code such as （A3）, (A01),
+    # （A1-1-3）, or 【A】 while preserving semantic parentheses.
     return re.sub(
-        r"\s*[\(\[（【]\s*[A-Za-z]+\d*\s*[\)\]）】]\s*$", "", text
+        r"\s*[\(\[（【]\s*[A-Za-z]+\d*(?:-\d+)*\s*[\)\]）】]\s*$",
+        "",
+        text,
     ).strip()
 
 
@@ -192,8 +212,12 @@ def preprocess(
     output_file: str | Path,
     *,
     overwrite: bool = False,
+    missing_field_policy: str = "error",
 ) -> list[dict[str, Any]]:
     """Preprocess one CSV/XLSX file and write normalized JSON."""
+    if missing_field_policy not in {"error", "skip"}:
+        raise ValueError("missing_field_policy must be 'error' or 'skip'")
+
     source = _validated_file(input_file, "Input file")
     frame = convert_schema(read_data(source), load_mapping(mapping_file))
 
@@ -206,7 +230,17 @@ def preprocess(
     if empty_rows:
         examples = ", ".join(str(index + 2) for index in empty_rows[:10])
         suffix = "..." if len(empty_rows) > 10 else ""
-        raise ValueError(f"field_name is empty at source rows: {examples}{suffix}")
+        message = f"field_name is empty at source rows: {examples}{suffix}"
+        if missing_field_policy == "error":
+            raise ValueError(message)
+        warnings.warn(
+            f"Skipping {len(empty_rows)} row(s): {message}",
+            UserWarning,
+            stacklevel=2,
+        )
+        frame = frame.drop(index=empty_rows).copy()
+        if frame.empty:
+            raise ValueError("No valid rows remain after skipping empty field_name values")
 
     for column in CLASSIFICATION_FIELDS:
         frame[column] = frame[column].map(normalize_label)
