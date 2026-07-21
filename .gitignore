@@ -8,7 +8,7 @@ __pycache__/
 # Jupyter Notebook
 .ipynb_checkpoints/
 *.ipynb
-
+temp
 # Model files
 model/
 zq/model/
