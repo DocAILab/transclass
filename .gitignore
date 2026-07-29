@@ -14,7 +14,8 @@ model/
 zq/model/
 data/raw/*
 data/processed/*
-data/rtf/*
+/data/rft/
+/data/corpus/
 script\preprocessing\rft_export.py
 # Results and outputs
 # OS files
