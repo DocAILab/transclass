@@ -1,0 +1,11 @@
+{
+  "asset_database_name": "database_name",
+  "asset_table_name": "table_name",
+  "表名备注": "table_description",
+  "asset_column_name": "field_name",
+  "column_comment": "field_description",
+  "asset_column_type": "field_type",
+  "二级分类（学校数据分类）": "level_1",
+  "分类": "level_2",
+  "分级": "data_level"
+}
