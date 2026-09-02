@@ -216,7 +216,7 @@ def parse_args():
     )
     parser.add_argument(
         "--input-dir",
-        default="data/processed/pers_info",
+        default="data/processed/education",
         help=(
             "Prepared dataset directory containing train.json, val.json "
             "and test.json."
@@ -224,7 +224,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output-dir",
-        default="data/rft/pers_info",
+        default="data/rft/education",
         help="Directory for train.jsonl, val.jsonl and test.jsonl.",
     )
     return parser.parse_args()

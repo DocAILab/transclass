@@ -27,6 +27,9 @@ STANDARD_FIELDS = (
     "level_4",
     "data_level",
 )
+DEFAULT_AUGMENTED_COLUMNS = tuple(
+    f"augmented_column_name{index}" for index in range(1, 8)
+)
 CLASSIFICATION_FIELDS = ("level_1", "level_2", "level_3", "level_4")
 IDENTITY_FIELDS = ("database_name", "table_name", "field_name")
 
@@ -183,7 +186,10 @@ def convert_schema(frame, mapping: dict[str, str]):
     for field in STANDARD_FIELDS:
         if field not in result.columns:
             result[field] = ""
-    return result[list(STANDARD_FIELDS)].copy()
+    extra_columns = [
+        column for column in DEFAULT_AUGMENTED_COLUMNS if column in result.columns
+    ]
+    return result[[*STANDARD_FIELDS, *extra_columns]].copy()
 
 
 def _atomic_write_json(data: Any, path: Path, overwrite: bool) -> None:
@@ -213,10 +219,14 @@ def preprocess(
     *,
     overwrite: bool = False,
     missing_field_policy: str = "error",
+    domain: str | None = None,
+    conflicting_label_policy: str = "error",
 ) -> list[dict[str, Any]]:
     """Preprocess one CSV/XLSX file and write normalized JSON."""
     if missing_field_policy not in {"error", "skip"}:
         raise ValueError("missing_field_policy must be 'error' or 'skip'")
+    if conflicting_label_policy not in {"error", "keep"}:
+        raise ValueError("conflicting_label_policy must be 'error' or 'keep'")
 
     source = _validated_file(input_file, "Input file")
     frame = convert_schema(read_data(source), load_mapping(mapping_file))
@@ -257,22 +267,62 @@ def preprocess(
             "/".join(value or "<empty>" for value in identity)
             for identity in conflicts[:10]
         )
-        raise ValueError(f"Conflicting labels found for the same field: {examples}")
+        message = f"Conflicting labels found for the same field: {examples}"
+        if conflicting_label_policy == "error":
+            raise ValueError(message)
+        warnings.warn(
+            f"Keeping conflicting records: {message}",
+            UserWarning,
+            stacklevel=2,
+        )
 
-    frame = frame.drop_duplicates(subset=list(IDENTITY_FIELDS), keep="first")
+    dedupe_fields = list(IDENTITY_FIELDS)
+    if conflicting_label_policy == "keep":
+        dedupe_fields.extend([*CLASSIFICATION_FIELDS, "data_level"])
+    frame = frame.drop_duplicates(subset=dedupe_fields, keep="first")
+
+    # Expand each source row into the original field plus any non-empty
+    # augmented field names. Each populated augmentation cell remains a sample,
+    # even when two generated names happen to be identical.
+    augmented_columns = tuple(
+        column for column in DEFAULT_AUGMENTED_COLUMNS if column in frame.columns
+    )
+    expanded_rows: list[dict[str, Any]] = []
+    for row in frame.to_dict(orient="records"):
+        base = dict(row)
+        base["_label_status"] = "original"
+        base["_source_field_name"] = row["field_name"]
+        base["_augmentation_column"] = ""
+        expanded_rows.append(base)
+        for column in augmented_columns:
+            augmented_name = clean_text(row.get(column, ""))
+            if not augmented_name:
+                continue
+            generated = dict(row)
+            generated["field_name"] = augmented_name
+            generated["_label_status"] = "synthesized"
+            generated["_source_field_name"] = row["field_name"]
+            generated["_augmentation_column"] = column
+            expanded_rows.append(generated)
+
+    frame = frame.__class__(expanded_rows)
+    domain_value = clean_text(domain) or source.stem.lower()
     result: list[dict[str, Any]] = []
     for row in frame.to_dict(orient="records"):
         identity = "\x1f".join(
-            [source.name.lower(), *(row[field] for field in IDENTITY_FIELDS)]
+            [
+                source.name.lower(),
+                *(row[field] for field in IDENTITY_FIELDS),
+                row["_source_field_name"],
+                row["_augmentation_column"],
+                *(row[field] for field in CLASSIFICATION_FIELDS),
+                row["data_level"],
+            ]
         )
         result.append({
             "id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
-            "key": normalize_name(row["field_name"]),
-            "label_status": (
-                "labeled"
-                if any(row[field] for field in CLASSIFICATION_FIELDS)
-                else "unlabeled"
-            ),
+            "domain": domain_value,
+            "label_status": row["_label_status"],
             "metadata": {
                 "database_name": row["database_name"],
                 "database_description": row["database_description"],

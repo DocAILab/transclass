@@ -132,6 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
     preprocess_parser.add_argument(
         "--overwrite", action="store_true", help="Replace an existing output file."
     )
+    preprocess_parser.add_argument(
+        "--conflicting-label-policy",
+        choices=("error", "keep"),
+        default="error",
+        help="How to handle the same field with conflicting labels (default: error).",
+    )
 
     prepare_parser = commands.add_parser(
         "prepare",
@@ -190,6 +196,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Replace all.json and existing split outputs.",
     )
+    prepare_parser.add_argument(
+        "--conflicting-label-policy",
+        choices=("error", "keep"),
+        default="error",
+        help="How to handle the same field with conflicting labels (default: error).",
+    )
 
     split_parser = commands.add_parser(
         "split", help="Create train.json, val.json, test.json, and a report."
@@ -236,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.output,
                 overwrite=args.overwrite,
                 missing_field_policy=args.missing_field_policy,
+                domain=args.dataset or args.input.stem,
+                conflicting_label_policy=args.conflicting_label_policy,
             )
             print(f"Preprocessed {len(result)} records -> {args.output}")
         elif args.command == "prepare":
@@ -252,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
                 all_file,
                 overwrite=args.overwrite,
                 missing_field_policy=args.missing_field_policy,
+                domain=args.dataset,
+                conflicting_label_policy=args.conflicting_label_policy,
             )
             print(f"Preprocessed {len(result)} records -> {all_file}")
             report = split_dataset(
