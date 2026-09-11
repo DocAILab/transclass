@@ -12,6 +12,8 @@ from .builder import (
     DEFAULT_CONTENT_COLUMN,
     DEFAULT_LABEL_COLUMN,
     build_corpus,
+    build_standard_corpus,
+    normalize_standard_corpus,
 )
 
 
@@ -68,6 +70,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="How to handle rows missing a label or content (default: skip).",
     )
     build.add_argument("--overwrite", action="store_true")
+    standard = commands.add_parser(
+        "standard", help="Generate a flat standard corpus JSON file."
+    )
+    standard.add_argument("--dataset", required=True)
+    standard.add_argument("--input", required=True, type=Path)
+    standard.add_argument("--processed", type=Path)
+    standard.add_argument("--output", required=True, type=Path)
+    standard.add_argument("--content-column", required=True)
+    standard.add_argument("--leaf-column", required=True)
+    standard.add_argument("--root-column")
+    standard.add_argument("--branch-column")
+    standard.add_argument("--subbranch-column")
+    standard.add_argument("--sensitivity-column")
+    standard.add_argument("--reference-standard", default="")
+    standard.add_argument("--missing-policy", choices=("error", "skip"), default="skip")
+    standard.add_argument("--overwrite", action="store_true")
+    normalize = commands.add_parser(
+        "normalize", help="Normalize an existing flat corpus JSON file."
+    )
+    normalize.add_argument("--dataset", required=True)
+    normalize.add_argument("--input", required=True, type=Path)
+    normalize.add_argument("--output", required=True, type=Path)
+    normalize.add_argument("--overwrite", action="store_true")
     return parser
 
 
@@ -75,6 +100,31 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "standard":
+            report = build_standard_corpus(
+                args.dataset,
+                args.input,
+                args.output,
+                processed_file=args.processed,
+                content_column=args.content_column,
+                leaf_column=args.leaf_column,
+                root_column=args.root_column,
+                branch_column=args.branch_column,
+                subbranch_column=args.subbranch_column,
+                sensitivity_column=args.sensitivity_column,
+                reference_standard=args.reference_standard,
+                missing_policy=args.missing_policy,
+                overwrite=args.overwrite,
+            )
+            print(json.dumps(report, ensure_ascii=False))
+            return 0
+        if args.command == "normalize":
+            report = normalize_standard_corpus(
+                args.input, args.output, dataset=args.dataset, overwrite=args.overwrite
+            )
+            print(json.dumps(report, ensure_ascii=False))
+            return 0
+
         source = args.input or _default_input(args.dataset)
         processed = args.processed
         if processed is None:

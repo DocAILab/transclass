@@ -4,7 +4,10 @@ from pathlib import Path
 
 
 SPLIT_NAMES = ("train", "val", "test")
-CLASSIFICATION_FIELDS = ("level_1", "level_2", "level_3", "level_4")
+CLASSIFICATION_FIELDS = (
+    "category_root_level", "category_branch_level",
+    "category_subbranch_level", "category_leaf_level",
+)
 METADATA_FIELDS = (
     "database_name",
     "database_description",
@@ -15,12 +18,13 @@ METADATA_FIELDS = (
     "field_type",
     "value",
 )
+GRADING_FIELDS = ("sensitivity_level",)
 
 DEVELOPER_PROMPT = """你是数据库字段数据分类分级智能体。
-根据用户提供的字段元数据，预测四级数据分类和数据等级。
+根据用户提供的字段元数据，预测四级数据分类和安全级别。
 只能输出一个合法、紧凑的 JSON 对象，不得输出解释、Markdown 或其他文字。
 输出结构必须严格为：
-{"classification":{"level_1":"","level_2":"","level_3":"","level_4":""},"data_level":""}
+{"classification":{"category_root_level":"","category_branch_level":"","category_subbranch_level":"","category_leaf_level":""},"grading":{"sensitivity_level":""}}
 如果训练数据中某个分类层级为空，输出中对应层级也保持空字符串。"""
 
 
@@ -45,6 +49,7 @@ def validate_item(item, index, source_path):
 
     metadata = item.get("metadata")
     classification = item.get("classification")
+    grading = item.get("grading")
 
     if not isinstance(metadata, dict):
         raise ValueError(f"Item {index} in {source_path} has invalid metadata")
@@ -52,11 +57,14 @@ def validate_item(item, index, source_path):
         raise ValueError(
             f"Item {index} in {source_path} has invalid classification"
         )
+    if not isinstance(grading, dict):
+        raise ValueError(f"Item {index} in {source_path} has invalid grading")
 
     missing_metadata = [field for field in METADATA_FIELDS if field not in metadata]
     missing_classification = [
         field for field in CLASSIFICATION_FIELDS if field not in classification
     ]
+    missing_grading = [field for field in GRADING_FIELDS if field not in grading]
 
     if missing_metadata:
         raise ValueError(
@@ -68,6 +76,11 @@ def validate_item(item, index, source_path):
             f"Item {index} in {source_path} is missing classification fields: "
             + ", ".join(missing_classification)
         )
+    if missing_grading:
+        raise ValueError(
+            f"Item {index} in {source_path} is missing grading fields: "
+            + ", ".join(missing_grading)
+        )
 
 
 def is_labeled(item):
@@ -76,19 +89,6 @@ def is_labeled(item):
         str(classification.get(field, "")).strip()
         for field in CLASSIFICATION_FIELDS
     )
-    status = item.get("label_status")
-
-    if status == "unlabeled" and inferred:
-        raise ValueError(
-            f"Item {item.get('id', '<unknown>')} has label_status=unlabeled "
-            "but contains a classification label"
-        )
-    if status == "labeled" and not inferred:
-        raise ValueError(
-            f"Item {item.get('id', '<unknown>')} has label_status=labeled "
-            "but all classification levels are empty"
-        )
-
     return inferred
 
 
@@ -122,7 +122,7 @@ def build_reference_answer(item):
             field: str(classification.get(field, ""))
             for field in CLASSIFICATION_FIELDS
         },
-        "data_level": str(item.get("data_level", "")),
+        "grading": {"sensitivity_level": str(item["grading"].get("sensitivity_level", ""))},
     }
 
 

@@ -21,16 +21,19 @@ STANDARD_FIELDS = (
     "field_name",
     "field_description",
     "field_type",
-    "level_1",
-    "level_2",
-    "level_3",
-    "level_4",
-    "data_level",
+    "category_root_level",
+    "category_branch_level",
+    "category_subbranch_level",
+    "category_leaf_level",
+    "sensitivity_level",
 )
 DEFAULT_AUGMENTED_COLUMNS = tuple(
     f"augmented_column_name{index}" for index in range(1, 8)
 )
-CLASSIFICATION_FIELDS = ("level_1", "level_2", "level_3", "level_4")
+CLASSIFICATION_FIELDS = (
+    "category_root_level", "category_branch_level",
+    "category_subbranch_level", "category_leaf_level",
+)
 IDENTITY_FIELDS = ("database_name", "table_name", "field_name")
 
 
@@ -91,6 +94,13 @@ def load_mapping(path: str | Path) -> dict[str, str]:
     for raw_key, raw_value in mapping.items():
         key = raw_key.strip()
         value = raw_value.strip()
+        value = {
+            "level_1": "category_root_level",
+            "level_2": "category_branch_level",
+            "level_3": "category_subbranch_level",
+            "level_4": "category_leaf_level",
+            "data_level": "sensitivity_level",
+        }.get(value, value)
         if not key or not value:
             raise ValueError("Mapping keys and values cannot be empty")
         if key in normalized:
@@ -255,11 +265,13 @@ def preprocess(
     for column in CLASSIFICATION_FIELDS:
         frame[column] = frame[column].map(normalize_label)
     frame["field_type"] = frame["field_type"].map(normalize_type)
-    frame["data_level"] = frame["data_level"].map(normalize_level)
+    # New datasets use domain-specific security labels (often Chinese text);
+    # preserve the cleaned value instead of restricting it to legacy L1-L4.
+    frame["sensitivity_level"] = frame["sensitivity_level"].map(clean_text)
 
     conflicts: list[tuple[Any, ...]] = []
     for identity, group in frame.groupby(list(IDENTITY_FIELDS), dropna=False, sort=False):
-        labels = group[list(CLASSIFICATION_FIELDS) + ["data_level"]].drop_duplicates()
+        labels = group[list(CLASSIFICATION_FIELDS) + ["sensitivity_level"]].drop_duplicates()
         if len(labels) > 1:
             conflicts.append(identity)
     if conflicts:
@@ -278,7 +290,7 @@ def preprocess(
 
     dedupe_fields = list(IDENTITY_FIELDS)
     if conflicting_label_policy == "keep":
-        dedupe_fields.extend([*CLASSIFICATION_FIELDS, "data_level"])
+        dedupe_fields.extend([*CLASSIFICATION_FIELDS, "sensitivity_level"])
     frame = frame.drop_duplicates(subset=dedupe_fields, keep="first")
 
     # Expand each source row into the original field plus any non-empty
@@ -316,7 +328,7 @@ def preprocess(
                 row["_source_field_name"],
                 row["_augmentation_column"],
                 *(row[field] for field in CLASSIFICATION_FIELDS),
-                row["data_level"],
+                row["sensitivity_level"],
             ]
         )
         result.append({
@@ -334,7 +346,7 @@ def preprocess(
                 "value": "",
             },
             "classification": {field: row[field] for field in CLASSIFICATION_FIELDS},
-            "data_level": row["data_level"],
+            "grading": {"sensitivity_level": row["sensitivity_level"]},
         })
 
     _atomic_write_json(result, Path(output_file), overwrite)

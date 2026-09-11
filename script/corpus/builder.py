@@ -17,6 +17,17 @@ from script.preprocessing.processor import normalize_label
 
 DEFAULT_LABEL_COLUMN = "四级子类"
 DEFAULT_CONTENT_COLUMN = "内容"
+STANDARD_FIELDS = (
+    "id",
+    "data_description_and_example",
+    "dataset",
+    "category_leaf_level",
+    "category_subbranch_level",
+    "category_branch_level",
+    "category_root_level",
+    "sensitivity_level",
+    "reference_standard",
+)
 
 
 def _load_pandas():
@@ -82,10 +93,61 @@ def _load_processed_labels(path: str | Path | None) -> tuple[Path | None, set[st
         classification = item.get("classification", {})
         if not isinstance(classification, dict):
             raise ValueError(f"Processed item {index} classification must be an object")
-        label = _clean_text(classification.get("level_4"))
+        label = _clean_text(classification.get("category_leaf_level"))
         if label:
             labels.add(label)
     return processed, labels
+
+
+def _load_processed_metadata(
+    path: str | Path | None,
+) -> tuple[Path | None, dict[str, dict[str, set[str]]]]:
+    if path is None:
+        return None, {}
+    processed = Path(path).expanduser().resolve()
+    if not processed.is_file():
+        raise FileNotFoundError(f"Processed dataset not found: {processed}")
+    try:
+        with processed.open("r", encoding="utf-8-sig") as file:
+            data = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid processed JSON: {processed}: {exc}") from exc
+    if not isinstance(data, list):
+        raise ValueError("Processed JSON must contain a list")
+
+    metadata: dict[str, dict[str, set[str]]] = {}
+    fields = (
+        "category_root_level",
+        "category_branch_level",
+        "category_subbranch_level",
+        "sensitivity_level",
+    )
+    for index, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise ValueError(f"Processed item {index} must be an object")
+        classification = item.get("classification", {})
+        grading = item.get("grading", {})
+        if not isinstance(classification, dict) or not isinstance(grading, dict):
+            raise ValueError(f"Processed item {index} has invalid classification/grading")
+        leaf = normalize_label(_clean_text(classification.get("category_leaf_level")))
+        if not leaf:
+            continue
+        values = metadata.setdefault(leaf, {field: set() for field in fields})
+        for field in fields[:-1]:
+            value = _clean_text(classification.get(field))
+            if value:
+                values[field].add(value)
+        sensitivity = _clean_text(grading.get("sensitivity_level"))
+        if sensitivity:
+            values["sensitivity_level"].add(sensitivity)
+    return processed, metadata
+
+
+def _single_processed_value(
+    metadata: dict[str, dict[str, set[str]]], leaf: str, field: str
+) -> str:
+    values = metadata.get(leaf, {}).get(field, set())
+    return next(iter(values)) if len(values) == 1 else ""
 
 
 def _display_path(path: Path, project_root: Path | None) -> str:
@@ -285,3 +347,161 @@ def build_corpus(
 
     _write_bundle(Path(output_dir), documents, report, overwrite=overwrite)
     return report
+
+
+def build_standard_corpus(
+    dataset: str,
+    input_file: str | Path,
+    output_file: str | Path,
+    *,
+    processed_file: str | Path | None = None,
+    content_column: str,
+    leaf_column: str,
+    root_column: str | None = None,
+    branch_column: str | None = None,
+    subbranch_column: str | None = None,
+    sensitivity_column: str | None = None,
+    reference_standard: str = "",
+    missing_policy: str = "skip",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Convert a classification guide table to the standard flat corpus JSON."""
+    if missing_policy not in {"error", "skip"}:
+        raise ValueError("missing_policy must be 'error' or 'skip'")
+    source, frame = _read_table(input_file)
+    column_map = {
+        "data_description_and_example": content_column,
+        "category_leaf_level": leaf_column,
+        "category_root_level": root_column,
+        "category_branch_level": branch_column,
+        "category_subbranch_level": subbranch_column,
+        "sensitivity_level": sensitivity_column,
+    }
+    required = [column for column in (content_column, leaf_column) if column not in frame]
+    optional_missing = [
+        column for column in column_map.values()
+        if column is not None and column not in frame
+    ]
+    if required or optional_missing:
+        raise ValueError(
+            "Corpus source is missing column(s): "
+            + ", ".join(sorted(set(required + optional_missing)))
+        )
+
+    processed, processed_metadata = _load_processed_metadata(processed_file)
+    records: list[dict[str, str]] = []
+    skipped_rows: list[int] = []
+    duplicate_rows: list[dict[str, int]] = []
+    ambiguous_fields: list[dict[str, Any]] = []
+    seen: dict[tuple[str, str], int] = {}
+    hierarchy_fields = (
+        "category_root_level",
+        "category_branch_level",
+        "category_subbranch_level",
+        "sensitivity_level",
+    )
+
+    for index, row in frame.iterrows():
+        source_row = int(index) + 2
+        content = _clean_text(row[content_column])
+        leaf = normalize_label(_clean_text(row[leaf_column]))
+        if not content or not leaf:
+            if missing_policy == "error":
+                raise ValueError(f"Missing content or leaf label at source row {source_row}")
+            skipped_rows.append(source_row)
+            continue
+        pair = (leaf, content)
+        if pair in seen:
+            duplicate_rows.append({
+                "source_row": source_row,
+                "duplicate_of_source_row": seen[pair],
+            })
+            continue
+        seen[pair] = source_row
+
+        values: dict[str, str] = {}
+        for field in hierarchy_fields:
+            column = column_map[field]
+            value = _clean_text(row[column]) if column else ""
+            if not value:
+                candidates = processed_metadata.get(leaf, {}).get(field, set())
+                if len(candidates) == 1:
+                    value = next(iter(candidates))
+                elif len(candidates) > 1:
+                    ambiguous_fields.append({
+                        "source_row": source_row,
+                        "field": field,
+                        "values": sorted(candidates),
+                    })
+            values[field] = value
+
+        records.append({
+            "id": _document_id(dataset.lower(), leaf, content),
+            "data_description_and_example": content,
+            "dataset": dataset,
+            "category_leaf_level": leaf,
+            "category_subbranch_level": values["category_subbranch_level"],
+            "category_branch_level": values["category_branch_level"],
+            "category_root_level": values["category_root_level"],
+            "sensitivity_level": values["sensitivity_level"],
+            "reference_standard": reference_standard,
+        })
+
+    if not records:
+        raise ValueError("No valid corpus documents were generated")
+    destination = Path(output_file).expanduser().resolve()
+    if destination.exists() and not overwrite:
+        raise FileExistsError(
+            f"Refusing to overwrite existing output: {destination}. Pass --overwrite."
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", newline="\n", delete=False,
+        dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp",
+    ) as file:
+        json.dump(records, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+        temporary = Path(file.name)
+    os.replace(temporary, destination)
+    return {
+        "dataset": dataset,
+        "source": str(source),
+        "processed_source": str(processed) if processed else None,
+        "input_rows": len(frame),
+        "exported_documents": len(records),
+        "skipped_rows": skipped_rows,
+        "duplicate_rows": duplicate_rows,
+        "ambiguous_processed_fields": ambiguous_fields,
+        "output_file": str(destination),
+    }
+
+
+def normalize_standard_corpus(
+    input_file: str | Path,
+    output_file: str | Path,
+    *,
+    dataset: str,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Normalize an existing flat corpus JSON and set its dataset identifier."""
+    source = Path(input_file).expanduser().resolve()
+    with source.open("r", encoding="utf-8-sig") as file:
+        data = json.load(file)
+    if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+        raise ValueError("Corpus JSON must contain a list of objects")
+    records = []
+    for index, item in enumerate(data):
+        missing = [field for field in STANDARD_FIELDS if field not in item]
+        if missing:
+            raise ValueError(f"Corpus item {index} is missing: {', '.join(missing)}")
+        record = {field: _clean_text(item.get(field)) for field in STANDARD_FIELDS}
+        record["dataset"] = dataset
+        records.append(record)
+    destination = Path(output_file).expanduser().resolve()
+    if destination.exists() and destination != source and not overwrite:
+        raise FileExistsError(
+            f"Refusing to overwrite existing output: {destination}. Pass --overwrite."
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(destination, records)
+    return {"input_rows": len(data), "exported_documents": len(records), "output_file": str(destination)}

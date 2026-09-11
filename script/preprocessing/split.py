@@ -13,11 +13,11 @@ from typing import Any
 
 
 LABEL_FIELDS = (
-    "classification.level_1",
-    "classification.level_2",
-    "classification.level_3",
-    "classification.level_4",
-    "data_level",
+    "classification.category_root_level",
+    "classification.category_branch_level",
+    "classification.category_subbranch_level",
+    "classification.category_leaf_level",
+    "grading.sensitivity_level",
 )
 MISSING = object()
 
