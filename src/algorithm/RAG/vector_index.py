@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
 
-PROJECT_ROOT = Path(os.environ.get("RAG_WORKSPACE_ROOT", "/Users/andiandian/Desktop/trandatacls")).expanduser().resolve() / "transclass_repo"
+PROJECT_ROOT = Path(__file__).resolve().parent
 STANDARDS_DIR = PROJECT_ROOT / "data" / "knowledge" / "standards_map"
-DEFAULT_CACHE = PROJECT_ROOT / "src/algorithm/RAG/storage"
+DEFAULT_CACHE = PROJECT_ROOT / "cache/indexes"
 
 PROFILE_STANDARD_FILES: dict[str, tuple[str, ...]] = {
     "shougang": ("guanji_dict.json",),
@@ -495,9 +495,10 @@ class XRAGClassifier:
         Settings.embed_model = embedding
         Settings.llm = None
 
+        from domain_config import model_identity
         fingerprint_payload = "\n".join(
             [
-                embedding_model,
+                model_identity(embedding_model),
                 *sorted(
                     f"{item.domain}\t{item.standard_id}\t{item.document_text}\t{item.category_path}"
                     for item in standards

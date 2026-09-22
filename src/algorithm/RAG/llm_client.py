@@ -38,7 +38,7 @@ from vector_index import (
 )
 
 
-PROJECT_ROOT = Path(os.environ.get("RAG_WORKSPACE_ROOT", "/Users/andiandian/Desktop/trandatacls")).expanduser().resolve() / "transclass_repo"
+PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = (
     PROJECT_ROOT
     / "data"

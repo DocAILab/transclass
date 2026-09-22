@@ -37,13 +37,13 @@ from vector_index import (
 )
 
 
-PROJECT_ROOT = Path(os.environ.get("RAG_WORKSPACE_ROOT", "/Users/andiandian/Desktop/trandatacls")).expanduser().resolve() / "transclass_repo"
+PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = (
     PROJECT_ROOT / "data" / "processed" / "retrieval"
 )
 CURRENT_EMBEDDING = "BAAI/bge-small-zh-v1.5"
 MULTILINGUAL_EMBEDDING = "BAAI/bge-m3"
-LOCAL_BGE_M3 = PROJECT_ROOT / "src/algorithm/RAG/models/BAAI_bge-m3"
+LOCAL_BGE_M3 = PROJECT_ROOT / "models/BAAI_bge-m3"
 CONFIGS = {
     "bge_zh_single": {
         "embedding": CURRENT_EMBEDDING,

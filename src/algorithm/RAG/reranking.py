@@ -29,7 +29,7 @@ from llm_client import (
 from vector_index import canonical_label, clean_text, macro_f1
 
 
-PROJECT_ROOT = Path(os.environ.get("RAG_WORKSPACE_ROOT", "/Users/andiandian/Desktop/trandatacls")).expanduser().resolve() / "transclass_repo"
+PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = (
     PROJECT_ROOT / "data" / "processed" / "reranking"
 )

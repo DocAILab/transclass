@@ -59,7 +59,7 @@ from dataset_utils import (
     candidate_counts, dataset_audit, grouped_metrics, run_manifest,
 )
 
-PROJECT_ROOT = Path(os.environ.get("RAG_WORKSPACE_ROOT", "/Users/andiandian/Desktop/trandatacls")).expanduser().resolve() / "transclass_repo"
+PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = (
     Path(__file__).resolve().parent / "results" / "experiments"
 )
@@ -168,11 +168,8 @@ def run_retrieval(
     expansions: dict[str, FieldExpansion],
     standards: Sequence[Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    embedding_model = (
-        str(LOCAL_BGE_M3)
-        if (LOCAL_BGE_M3 / "config.json").exists()
-        else MULTILINGUAL_EMBEDDING
-    )
+    from domain_config import require_local_model
+    embedding_model = str(require_local_model(args.model_dir))
     init_started = time.perf_counter()
     classifier = XRAGClassifier(
         standards=standards,
@@ -387,13 +384,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--use-domain", action=argparse.BooleanOptionalAction, default=True,
                         help="默认读取每条记录的 domain；--no-use-domain 禁用并使用通用流程")
-    parser.add_argument("--data-root", type=Path, default=PROJECT_ROOT.parent / "data")
+    parser.add_argument("--data-root", type=Path, default=PROJECT_ROOT / "data")
     for name in ("finance", "education", "vehicle"):
         parser.add_argument(f"--{name}-corpus", type=Path, help="覆盖该领域的语料路径")
     inputs = parser.add_mutually_exclusive_group()
     inputs.add_argument("--input-json", type=Path)
     parser.add_argument("--dataset-id", help="仅用于结果目录隔离，不用于推理领域提示")
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--build-index", action="store_true", help="只构建知识库索引，不调用线上模型")
+    parser.add_argument("--model-dir", type=Path, default=LOCAL_BGE_M3)
     inputs.add_argument("--input-xlsx", type=Path)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE)
@@ -404,7 +403,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--rrf-k", type=int, default=60)
     parser.add_argument("--output-k", type=int, default=30)
     parser.add_argument("--candidate-k", type=int, default=30)
-    parser.add_argument("--dictionary-batch-size", type=int, default=8)
+    parser.add_argument("--dictionary-batch-size", type=int, default=4)
     parser.add_argument("--llm-batch-size", type=int, default=8)
     parser.add_argument("--llm-model", default=MODELSCOPE_DEFAULT_MODEL)
     parser.add_argument("--llm-base-url", default=MODELSCOPE_BASE_URL)
@@ -533,67 +532,37 @@ def run_route(args, examples, original_standards, audit, manifest):
     return summary
 
 
-BASELINE_RUNS = {'DCG_FIN': {'run': '156f9a057f6d31ff3c11', 'sha256': {'summary.json': '7336899072dca1727439800a21da9e19b2f06ea2010ecf8e55fcc83b0151ac11', 'retrieval.json': 'e909295467a36ce8940e66311941f35be86624251e46ad8b12b8081d8686dd9f', 'rerank.json': 'a9b5b2f09ee7b2596e284d6a932ebca1a822b9ac9079fcaa4478acb0b06921cf'}}, 'DCG_EDU': {'run': '20e2e668f7ed70a4a0b1', 'sha256': {'summary.json': '1efe0fbefd342cc959eebc3db845b91bfb12737288594be4fad7360d52b45929', 'retrieval.json': '0c411fd972ee1777f1cd64557072452f0bec25b5dad708be93ff8d51cd0b1763', 'rerank.json': 'f63aabdca93964a1343fc93fddd77ec592f6a1b33213680439dbace5dc5cf39b'}}, 'DCG_VEH': {'run': 'b959b1d007bafda65f08', 'sha256': {'summary.json': '1e0db582862c3e827e0a76df761be80622fd5c370e9db821ac0a1d2e6a3a94b7', 'retrieval.json': 'a6077aced5e490e0cb3a0b08afe649b370b128f0252947764eac1f79056f3b15', 'rerank.json': '98c929dc1078125c94145d9de99800cb055eca95c2a784f403d78c7954641b33'}}}
-
-
 def reproduce_results(argv):
-    """Recalculate archived predictions; never regenerate or claim live inference."""
-    import hashlib
-    import math
+    """Recalculate explicitly selected saved predictions without model calls."""
     from dataset_utils import prediction_metrics
-    parser = argparse.ArgumentParser(description="从已归档逐条预测复核历史指标，不调用模型")
-    parser.add_argument("--dataset", choices=list(BASELINE_RUNS), help="省略时复核三个领域")
-    parser.add_argument("--output", type=Path, help="可选：保存本次复核报告")
+    import math
+    parser = argparse.ArgumentParser(description="复核指定实验目录的逐条预测")
+    parser.add_argument("--result-dir", required=True, type=Path)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
-    reports = {}
-    for dataset in ([args.dataset] if args.dataset else list(BASELINE_RUNS)):
-        entry = BASELINE_RUNS[dataset]
-        folder = PROJECT_ROOT / "data/processed/finance_dynamic_rag" / dataset / entry["run"]
-        contents = {}
-        for filename, expected in entry["sha256"].items():
-            path = folder / filename
-            if not path.is_file():
-                raise ValueError(f"历史结果不存在：{path}。请设置 RAG_WORKSPACE_ROOT 或使用 --run 重新实验。")
-            raw = path.read_bytes()
-            if hashlib.sha256(raw).hexdigest() != expected:
-                raise ValueError(f"历史文件校验失败，不能冒充交付基准：{path}")
-            contents[filename] = json.loads(raw)
-        baseline = contents["summary.json"]
-        identity = baseline["manifest"]["identity"]
-        data_folder = PROJECT_ROOT.parent / "data" / dataset
-        test_path = data_folder / f"{dataset}_test.json"
-        corpus_path = data_folder / f"{dataset}_Corpus.json"
-        if hashlib.sha256(test_path.read_bytes()).hexdigest() != identity["input_sha256"]:
-            raise ValueError(f"测试集与历史实验不一致：{test_path}")
-        if [hashlib.sha256(corpus_path.read_bytes()).hexdigest()] != identity["corpus_sha256"]:
-            raise ValueError(f"知识库与历史实验不一致：{corpus_path}")
-        retrieval = contents["retrieval.json"]
-        rerank = contents["rerank.json"]
-        count = baseline["dataset"]["rows"]
-        if len(retrieval) != count or len(rerank) != count:
-            raise ValueError(f"{dataset} 逐条结果不完整")
-        r = _metrics(retrieval, "vector_candidates")
-        q = prediction_metrics(rerank, "rerank_prediction")
-        for actual, expected in ((r["top1_accuracy"], baseline["retrieval"]["top1_accuracy"]),
-                                 (r["macro_f1"], baseline["retrieval"]["macro_f1"]),
-                                 (q["accuracy"], baseline["rerank"]["accuracy"]),
-                                 (q["macro_f1"], baseline["rerank"]["macro_f1"])):
-            if not math.isclose(actual, expected, rel_tol=0, abs_tol=1e-12):
-                raise ValueError(f"{dataset} 重新计算的指标与基准不一致")
-        if r["candidate_recall_at"] != baseline["retrieval"]["candidate_recall_at"]:
-            raise ValueError(f"{dataset} Recall@K 与基准不一致")
-        reports[dataset] = {"source_directory": str(folder), "rows": count,
-                            "retrieval": r, "rerank": q, "verified": True}
-    print("历史结果复核：从逐条预测重新计算；模型调用 0 次。")
-    print("领域       样本数  检索Accuracy  重排Accuracy  检索Macro-F1  重排Macro-F1")
-    for dataset, report in reports.items():
-        r, q = report["retrieval"], report["rerank"]
-        print(f"{dataset:<10} {report['rows']:>5}  {r['top1_accuracy']:>11.2%}  {q['accuracy']:>11.2%}"
-              f"  {r['macro_f1']:>12.4f}  {q['macro_f1']:>12.4f}")
+    folder = args.result_dir.expanduser().resolve()
+    baseline = json.loads((folder / "summary.json").read_text(encoding="utf-8"))
+    rows = json.loads((folder / "retrieval.json").read_text(encoding="utf-8"))
+    result = {"mode": "saved_prediction_replay", "real_api_calls": 0,
+              "source_directory": str(folder), "retrieval": _metrics(rows, "vector_candidates")}
+    if len(rows) != baseline["dataset"]["rows"]:
+        raise ValueError("逐条预测数量与汇总不一致")
+    stages = [("retrieval", ("top1_accuracy", "macro_f1"))]
+    if baseline.get("rerank") is not None:
+        rerank = json.loads((folder / "rerank.json").read_text(encoding="utf-8"))
+        if len(rerank) != len(rows):
+            raise ValueError("重排预测数量不一致")
+        result["rerank"] = prediction_metrics(rerank, "rerank_prediction")
+        stages.append(("rerank", ("accuracy", "macro_f1")))
+    for stage, keys in stages:
+        for key in keys:
+            if not math.isclose(result[stage][key], baseline[stage][key], abs_tol=1e-12):
+                raise ValueError(f"{stage}.{key} 与保存的汇总不一致")
+    if result["retrieval"]["candidate_recall_at"] != baseline["retrieval"]["candidate_recall_at"]:
+        raise ValueError("Recall@K 与保存的汇总不一致")
     if args.output:
-        write_json(args.output, {"mode": "archived_prediction_replay", "real_api_calls": 0,
-                                 "datasets": reports})
-        print(f"复核报告：{args.output.resolve()}")
+        write_json(args.output, result)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -603,6 +572,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return reproduce_results(argv[1:])
     args = parse_args(argv)
     input_path = (args.input_json or args.input_xlsx).expanduser().resolve()
+    if not input_path.is_file():
+        raise ValueError(f"测试集不存在：{input_path}；先执行 bash run_rag.sh --download-data")
     examples = (read_test_json(input_path, use_domain=args.use_domain) if args.input_json
                 else read_finance_xlsx(input_path, sheet_name=args.sheet, header_row=args.header_row,
                                        input_column="D", label_column="I", level_column="J"))
@@ -643,8 +614,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                       corpus_domains=sorted({item.domain for item in standards}))
         route_audits[route] = report
     audit["routes"] = route_audits
+    if not args.validate_only:
+        from domain_config import require_local_model
+        require_local_model(args.model_dir)
+    if args.build_index and not args.validate_only:
+        for route in groups:
+            standards = all_standards if route == "generic" else corpora[route]
+            classifier = XRAGClassifier(
+                standards=expand_standards_with_fragments(standards),
+                embedding_model=str(args.model_dir.expanduser().resolve()),
+                retriever_type="vector", top_k=len(standards),
+                cache_dir=args.cache_dir / route, device=args.device,
+                recall_k=len(standards), rrf_k=args.rrf_k,
+            )
+            print(f"索引已就绪：{route}；目录：{args.cache_dir / route}；线上模型调用 0 次")
+            del classifier
+        return 0
     manifest = run_manifest(args, input_path, paths)
-    args.legacy_cache_roots = [PROJECT_ROOT / "data" / "processed", args.output_dir]
+    args.legacy_cache_roots = []  # 旧词典仅通过显式迁移命令导入。
     args.dataset_id = args.dataset_id or input_path.stem
     output_dir = args.output_dir / args.dataset_id / manifest["fingerprint"]
     if args.validate_only:

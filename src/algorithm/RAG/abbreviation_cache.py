@@ -15,7 +15,7 @@ from abbreviation_generator import (
 )
 from domain_config import resolve_domain
 
-DEFAULT_ABBREVIATION_CACHE = Path(os.environ.get("RAG_WORKSPACE_ROOT", "/Users/andiandian/Desktop/trandatacls")).expanduser().resolve() / "transclass_repo" / 'data/cache/abbreviations'
+DEFAULT_ABBREVIATION_CACHE = Path(__file__).resolve().parent / 'cache/abbreviations'
 
 
 def cache_path(root: Path, domain: str, model: str, prompt_version: str = PROMPT_VERSION) -> Path:
